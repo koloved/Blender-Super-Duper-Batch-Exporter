@@ -1,7 +1,6 @@
 import bpy
 from bpy.types import Panel, UIList
 from . import get_icon_id
-import os
 
 
 class BATCH_EXPORT_UL_object_list(UIList):
@@ -11,15 +10,6 @@ class BATCH_EXPORT_UL_object_list(UIList):
         else:
             layout.label(text="(deleted)", icon='ERROR')
 
-# Method to get addon name - sometimes more reliable than __package__
-def get_addon_name_from_bl_info():
-    # Try to get the addon name from bl_info in the __init__.py
-    import sys
-    for mod_name, mod in sys.modules.items():
-        if mod_name.startswith(__package__):
-            if hasattr(mod, 'bl_info'):
-                return mod_name
-    return __package__  # Fallback to package name
 
 # Draws the .blend file specific settings used in the
 # Popover panel or Side Panel panel
@@ -32,16 +22,16 @@ def draw_settings(self, context):
     copies = False
     name = __package__
     if name in context.preferences.addons:
-        prefs = context.preferences.addons[name].preferences
-        if prefs and hasattr(prefs, 'copy_on_export'):
-            copies = prefs.copy_on_export
+        copies = context.preferences.addons[name].preferences.copy_on_export
 
-    # Get custom icon
+    # Export button + open-folder shortcut
     icon_id = get_icon_id("batchexport_icon")
+    row = self.layout.row(align=True)
     if icon_id:
-        self.layout.operator('export_mesh.batch', icon_value=icon_id)
+        row.operator('export_mesh.batch', icon_value=icon_id)
     else:
-        self.layout.operator('export_mesh.batch', icon='EXPORT')
+        row.operator('export_mesh.batch', icon='EXPORT')
+    row.operator('batch_export.open_directory', text='', icon='FILE_FOLDER')
 
     # Options
     self.layout.separator()
@@ -72,6 +62,8 @@ def draw_settings(self, context):
         side = list_row.column(align=True)
         side.operator("batch_export.list_add", text="", icon='ADD')
         side.operator("batch_export.list_remove", text="", icon='REMOVE')
+        side.separator()
+        side.operator("batch_export.list_remove_invalid", text="", icon='TRASH')
     if 'OBJECT' in settings.mode:
         col.prop(settings, 'prefix_collection')
     if 'SUBDIR' in settings.mode:
@@ -88,6 +80,7 @@ def draw_settings(self, context):
     elif settings.file_format == 'USD':
         col.prop(settings, 'usd_format')
         col.prop(settings, 'usd_preset_enum')
+        col.prop(settings, 'usd_export_animation')
     elif settings.file_format == 'OBJ':
         col.prop(settings, 'obj_preset_enum')
         self.layout.prop(settings, 'apply_mods')
@@ -101,6 +94,7 @@ def draw_settings(self, context):
         col.prop(settings, 'fbx_preset_enum')
         self.layout.prop(settings, 'apply_mods')
     elif settings.file_format == 'glTF':
+        col.prop(settings, 'gltf_format')
         col.prop(settings, 'gltf_preset_enum')
         self.layout.prop(settings, 'apply_mods')
     self.layout.use_property_split = False
@@ -116,7 +110,6 @@ def draw_settings(self, context):
     header, body = self.layout.panel("sdbe_transform_panel", default_closed=True)
     header.label(text="Transform on Export:")
     if body is not None:
-        #body.separator()
         col = body.column(align=True)
         col.prop(settings, 'apply_location')
         col.prop(settings, 'apply_rotation')
@@ -137,9 +130,8 @@ def draw_settings(self, context):
         if settings.set_scale:
             col.prop(settings, 'scale', text="")
 
-
     # LOD Creation
-    if settings.file_format == 'FBX':
+    if settings.file_format in {'FBX', 'glTF'}:
         col = self.layout.column(align=True, heading="Level of Detail:")
         col.prop(settings, 'create_lod')
         if settings.create_lod:
@@ -152,61 +144,31 @@ def draw_settings(self, context):
 # Draws the button and popover dropdown button used in the
 # 3D Viewport Header or Top Bar
 def draw_popover(self, context):
+    name = __package__
+    if name not in context.preferences.addons:
+        return
+    location = context.preferences.addons[name].preferences.addon_location
 
-    # Get custom icon
-    icon_id = get_icon_id("batchexport_icon")
-
-    try:
-        prefs = None
-        name = get_addon_name_from_bl_info()
-        if get_addon_name_from_bl_info() in context.preferences.addons:
-            prefs = context.preferences.addons[name].preferences
-
-        if not prefs:
-            # Fallback: Just show the UI
-            row = self.layout.row()
-            row = row.row(align=True)
-            if icon_id:
-                row.operator('export_mesh.batch', text='', icon_value=icon_id).invoke(context, 'DEFAULT')
-            else:
-                row.operator('export_mesh.batch', text='', icon='EXPORT').invoke(context, 'DEFAULT')
-            row.popover(panel='POPOVER_PT_batch_export', text='')
+    # draw_popover is appended to both the Top Bar and the 3D Viewport header
+    # menus; the menu class name tells us which one we're currently drawing in.
+    cls_name = type(self).__name__
+    if 'TOPBAR' in cls_name:
+        if location != 'TOPBAR':
             return
+    elif 'VIEW3D' in cls_name:
+        if location != '3DHEADER':
+            return
+    else:
+        return
 
-        # Check if we should draw based on menu type
-        draw_in_current_menu = False
+    icon_id = get_icon_id("batchexport_icon")
+    row = self.layout.row(align=True)
+    if icon_id:
+        row.operator('export_mesh.batch', text='', icon_value=icon_id)
+    else:
+        row.operator('export_mesh.batch', text='', icon='EXPORT')
+    row.popover(panel='POPOVER_PT_batch_export', text='')
 
-        if hasattr(self, 'bl_space_type'):
-            if self.bl_space_type == 'TOPBAR' and prefs.addon_location == 'TOPBAR':
-                draw_in_current_menu = True
-            elif self.bl_space_type == 'VIEW_3D' and prefs.addon_location == '3DHEADER':
-                draw_in_current_menu = True
-        else:
-            # If space_type not available, check class name
-            if 'TOPBAR' in self.__class__.__name__ and prefs.addon_location == 'TOPBAR':
-                draw_in_current_menu = True
-            elif 'VIEW3D' in self.__class__.__name__ and prefs.addon_location == '3DHEADER':
-                draw_in_current_menu = True
-
-        if draw_in_current_menu:
-            row = self.layout.row()
-            row = row.row(align=True)
-            if icon_id:
-                row.operator('export_mesh.batch', text='', icon_value=icon_id)
-            else:
-                row.operator('export_mesh.batch', text='', icon='EXPORT')
-            row.popover(panel='POPOVER_PT_batch_export', text='')
-    except Exception as e:
-        # Debug output to system console
-        print(f"Batch Export addon error in draw_popover: {e}")
-        # Fallback: Just draw the UI anyway
-        row = self.layout.row()
-        row = row.row(align=True)
-        if icon_id:
-            row.operator('export_mesh.batch', text='', icon_value=icon_id)
-        else:
-            row.operator('export_mesh.batch', text='', icon='EXPORT')
-        row.popover(panel='POPOVER_PT_batch_export', text='')
 
 # Side Panel panel (used with Side Panel option)
 class VIEW3D_PT_batch_export(Panel):
@@ -217,30 +179,14 @@ class VIEW3D_PT_batch_export(Panel):
 
     @classmethod
     def poll(cls, context):
-        try:
-
-            name = get_addon_name_from_bl_info()
-            if name in context.preferences.addons:
-                prefs = context.preferences.addons[name].preferences
-                # Return true by default if we can't determine preferences
-                if not hasattr(prefs, 'addon_location'):
-                    return True
-                return prefs.addon_location == '3DSIDE'
-
-            # If we can't find preferences, show the panel anyway as a fallback
-            return True
-        except Exception as e:
-            print(f"Batch Export addon error in VIEW3D_PT_batch_export.poll: {e}")
-            # If there's an error, show the panel as a fallback
-            return True
+        name = __package__
+        if name in context.preferences.addons:
+            return context.preferences.addons[name].preferences.addon_location == '3DSIDE'
+        return False
 
     def draw(self, context):
-        try:
-            draw_settings(self, context)
-        except Exception as e:
-            # Debug output
-            print(f"Batch Export addon error in VIEW3D_PT_batch_export.draw: {e}")
-            self.layout.label(text="Error loading UI. Check console for details.")
+        draw_settings(self, context)
+
 
 # Popover panel (used on 3D Viewport Header or Top Bar option)
 class POPOVER_PT_batch_export(Panel):
@@ -251,30 +197,13 @@ class POPOVER_PT_batch_export(Panel):
 
     @classmethod
     def poll(cls, context):
-        try:
-            # Try multiple methods to get addon name
-            name = get_addon_name_from_bl_info()
-            if name in context.preferences.addons:
-                prefs = context.preferences.addons[name].preferences
-                # Return true by default if we can't determine preferences
-                if not hasattr(prefs, 'addon_location'):
-                    return True
-                return prefs.addon_location in ['TOPBAR', '3DHEADER']
-
-            # If we can't find preferences, show the panel anyway as a fallback
-            return True
-        except Exception as e:
-            print(f"Batch Export addon error in POPOVER_PT_batch_export.poll: {e}")
-            # If there's an error, show the panel as a fallback
-            return True
+        name = __package__
+        if name in context.preferences.addons:
+            return context.preferences.addons[name].preferences.addon_location in {'TOPBAR', '3DHEADER'}
+        return False
 
     def draw(self, context):
-        try:
-            draw_settings(self, context)
-        except Exception as e:
-            # Debug output
-            print(f"Batch Export addon error in POPOVER_PT_batch_export.draw: {e}")
-            self.layout.label(text="Error loading UI. Check console for details.")
+        draw_settings(self, context)
 
 
 registry = [

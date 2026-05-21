@@ -20,12 +20,13 @@ class EXPORT_MESH_OT_batch(Operator):
         self.file_count = 0
         self.copy_count = 0
         self.skipped_lods = []
+        self.failed_jobs = []
         settings = context.scene.batch_export
         prefs = context.preferences.addons[__package__].preferences
 
         # 1. Resolve base directory
         try:
-            base_dir = self._resolve_base_dir(settings, prefs)
+            base_dir = utils.resolve_base_dir(settings, prefs)
         except ValueError as e:
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
@@ -43,16 +44,32 @@ class EXPORT_MESH_OT_batch(Operator):
 
         # 4. Run the entire export inside a state-preservation context manager
         with self._preserve_blender_state(context):
+            jobs = list(self._generate_export_jobs(settings, filtered_objects, base_dir))
 
-            # 5. Generate and process each export job
+            # Warn (but don't abort) if separate jobs resolve to the same file.
+            collisions = self._detect_collisions(settings, jobs)
+            if collisions:
+                self.report(
+                    {'WARNING'},
+                    f"{len(collisions)} file(s) share an output path and will "
+                    f"overwrite each other: {', '.join(collisions)}"
+                )
+
+            # 5. Process each job in isolation so one failure can't abort the batch.
+            wm = context.window_manager
+            wm.progress_begin(0, len(jobs))
             try:
-                for job in self._generate_export_jobs(settings, filtered_objects, base_dir):
-                    self._process_export_job(context, settings, job)
-            except Exception as e:
-                self.report({'ERROR'}, f"Operation failed: {e}")
-                import traceback
-                traceback.print_exc()
-                return {'CANCELLED'}
+                for i, job in enumerate(jobs):
+                    try:
+                        self._process_export_job(context, settings, job)
+                    except Exception as e:
+                        self.failed_jobs.append(job['name'])
+                        print(f"Failed to export '{job['name']}': {e}")
+                        import traceback
+                        traceback.print_exc()
+                    wm.progress_update(i + 1)
+            finally:
+                wm.progress_end()
 
         # 6. Report final results
         self._report_results(context, settings)
@@ -62,36 +79,19 @@ class EXPORT_MESH_OT_batch(Operator):
     # 1. VALIDATION AND SETUP
     # =================================================================
 
-    def _resolve_base_dir(self, settings, prefs):
-        """
-        Calculates the absolute base directory for exports.
-        If a project_dir preference is set, it acts as the root and
-        settings.directory is treated as relative to it.
-        Raises ValueError if the path cannot be resolved (e.g. unsaved .blend
-        with a relative output directory and no project dir set).
-        """
-        project_dir_raw = getattr(prefs, 'project_dir', '')
-
-        if project_dir_raw:
-            # Project Directory overrides the .blend file as the relative root.
-            project_root = Path(bpy.path.abspath(project_dir_raw))
-
-            relative_part = settings.directory
-            # Strip Blender's '//' relative prefix so pathlib joins correctly.
-            if relative_part.startswith('//'):
-                relative_part = relative_part[2:]
-            elif relative_part.startswith('\\'):
-                relative_part = relative_part[1:]
-
-            return (project_root / relative_part).resolve()
-        else:
-            # Standard Blender behaviour: relative to the .blend file.
-            if settings.directory.startswith('//') and not bpy.data.is_saved:
-                raise ValueError(
-                    "Save the .blend file before exporting to a relative directory,\n"
-                    "or set a Project Directory in Preferences."
-                )
-            return Path(bpy.path.abspath(settings.directory)).resolve()
+    def _detect_collisions(self, settings, jobs):
+        """Returns cleaned file names that resolve to the same output path
+        and would therefore silently overwrite each other."""
+        seen = set()
+        collisions = []
+        for job in jobs:
+            clean_name = settings.prefix + bpy.path.clean_name(job['name']) + settings.suffix
+            key = str((job['directory'] / clean_name).resolve())
+            if key in seen:
+                collisions.append(clean_name)
+            else:
+                seen.add(key)
+        return collisions
 
     # =================================================================
     # 2. STATE MANAGEMENT (CONTEXT MANAGERS)
@@ -194,7 +194,6 @@ class EXPORT_MESH_OT_batch(Operator):
 
         data_backups = {}       # obj -> original data
         transform_backups = {}  # obj -> (location, rotation_euler, rotation_quaternion, scale)
-        flip_targets = []       # mesh objects with negative-determinant scale
 
         for obj in objects_to_apply:
             if obj is None or obj.data is None or not hasattr(obj.data, 'copy'):
@@ -212,15 +211,6 @@ class EXPORT_MESH_OT_batch(Operator):
                 obj.scale.copy(),
             )
             obj.data = obj.data.copy()
-            """
-            if (
-                settings.apply_scale
-                and settings.corrective_flip_normals
-                and obj.type == 'MESH'
-                and (obj.scale.x * obj.scale.y * obj.scale.z) < 0.0
-            ):
-                flip_targets.append(obj)
-            """
 
         try:
             if data_backups:
@@ -244,12 +234,6 @@ class EXPORT_MESH_OT_batch(Operator):
                     )
                 except RuntimeError as e:
                     print(f"transform_apply failed: {e}")
-
-                #for obj in flip_targets:
-                #    mesh = obj.data
-                #    for poly in mesh.polygons:
-                #        poly.flip()
-                #    mesh.update()
 
                 # Force the depsgraph to refresh so exporters (notably glTF, which
                 # reads evaluated data through the depsgraph) pick up the swapped,
@@ -288,8 +272,8 @@ class EXPORT_MESH_OT_batch(Operator):
     @contextmanager
     def _managed_lods(self, settings, obj):
         """
-        Creates temporary LOD hierarchy objects for FBX export and guarantees
-        their removal afterwards, even if an exception occurs.
+        Creates temporary LOD hierarchy objects for FBX/glTF export and
+        guarantees their removal afterwards, even if an exception occurs.
         Yields the list of objects that should be selected for export.
         """
         is_editable = (
@@ -300,7 +284,7 @@ class EXPORT_MESH_OT_batch(Operator):
             )
         )
 
-        wants_lods = settings.create_lod and settings.file_format == 'FBX' and obj.type == 'MESH'
+        wants_lods = settings.create_lod and settings.file_format in {'FBX', 'glTF'} and obj.type == 'MESH'
 
         # If they want LODs but the object is linked, warn the user and just export the base mesh.
         if wants_lods and not is_editable:
@@ -317,6 +301,7 @@ class EXPORT_MESH_OT_batch(Operator):
         lod_objects = []
         original_name = obj.name
         original_parent = obj.parent
+        original_apply_mods = settings.apply_mods
         collection = obj.users_collection[0]
 
         try:
@@ -365,6 +350,7 @@ class EXPORT_MESH_OT_batch(Operator):
             yield lod_objects
 
         finally:
+            settings.apply_mods = original_apply_mods
             for lod_obj in lod_objects:
                 if lod_obj and lod_obj.name in bpy.data.objects:
                     bpy.data.objects.remove(lod_obj, do_unlink=True)
@@ -390,8 +376,8 @@ class EXPORT_MESH_OT_batch(Operator):
         elif limit == 'LIST':
             list_objects = {item.object for item in settings.export_list if item.object is not None}
             source = [obj for obj in context.view_layer.objects if obj in list_objects]
-        else:  # 'ALL'
-            source = list(context.view_layer.objects)
+        else:
+            source = []
 
         return [obj for obj in source if obj.type in settings.object_types]
 
@@ -504,7 +490,7 @@ class EXPORT_MESH_OT_batch(Operator):
 
                         is_lod_job = (
                             settings.create_lod
-                            and settings.file_format == 'FBX'
+                            and settings.file_format in {'FBX', 'glTF'}
                             and len(job['objects']) == 1
                             and job['objects'][0].type == 'MESH'
                         )
@@ -581,7 +567,7 @@ class EXPORT_MESH_OT_batch(Operator):
             return
 
         try:
-            main_export_root = self._resolve_base_dir(settings, prefs)
+            main_export_root = utils.resolve_base_dir(settings, prefs)
             try:
                 relative_path = exported_path.relative_to(main_export_root)
             except ValueError:
@@ -601,31 +587,38 @@ class EXPORT_MESH_OT_batch(Operator):
         """Reports the final export summary to the user."""
         prefs = context.preferences.addons[__package__].preferences
         copies_enabled = prefs.copy_on_export and settings.copy_on_export
+        failed = self.failed_jobs
 
         if self.file_count == 0:
-            self.report({'WARNING'}, "Operation complete. No files were exported.")
+            if failed:
+                self.report({'ERROR'}, f"Export failed for all {len(failed)} job(s). See console for details.")
+            else:
+                self.report({'WARNING'}, "Operation complete. No files were exported.")
             return
 
-        # Build the base success message
         msg = f"Exported {self.file_count} file(s)"
         if copies_enabled and self.copy_count > 0:
             msg += f" (with {self.copy_count} copies)"
 
-        # If we skipped any LODs, change the final report to a warning
-        if hasattr(self, 'skipped_lods') and self.skipped_lods:
-            msg += f". WARNING: Skipped LOD generation for {len(self.skipped_lods)} linked object(s)."
-            self.report({'WARNING'}, msg)
-            
-            # Print the exact list to the console so the user can check which ones
-            print(f"\n--- BATCH EXPORT WARNING ---")
-            print(f"Skipped LOD generation for the following linked objects:")
+        level = 'INFO'
+
+        if failed:
+            msg += f". FAILED: {len(failed)} job(s) - {', '.join(failed)}"
+            level = 'WARNING'
+
+        if self.skipped_lods:
+            msg += f". Skipped LOD generation for {len(self.skipped_lods)} linked object(s)."
+            level = 'WARNING'
+            print("\n--- BATCH EXPORT WARNING ---")
+            print("Skipped LOD generation for the following linked objects:")
             for name in self.skipped_lods:
                 print(f"  - {name}")
-            print(f"----------------------------\n")
-        else:
-            # Clean success
+            print("----------------------------\n")
+
+        if level == 'INFO':
             msg += " successfully."
-            self.report({'INFO'}, msg)
+
+        self.report({level}, msg)
 
     # =================================================================
     # 6. INDIVIDUAL EXPORT WRAPPERS
@@ -645,13 +638,14 @@ class EXPORT_MESH_OT_batch(Operator):
         return full_path
 
     def _export_gltf(self, settings, fp_no_ext):
-        # glTF exporter appends the extension itself when export_format is set,
+        # glTF exporter appends the extension itself based on export_format,
         # so we pass the path without extension and let Blender handle it.
-        full_path = str(fp_no_ext) + '.glb'
+        ext = '.glb' if settings.gltf_format == 'GLB' else '.gltf'
+        full_path = str(fp_no_ext) + ext
         options = utils.load_operator_preset('export_scene.gltf', settings.gltf_preset)
         options.update({
             "filepath": str(fp_no_ext),
-            "export_format": 'GLB',
+            "export_format": settings.gltf_format,
             "use_selection": True,
             "export_apply": settings.apply_mods,
         })
@@ -681,6 +675,7 @@ class EXPORT_MESH_OT_batch(Operator):
         options.update({
             "filepath": full_path,
             "selected_objects_only": True,
+            "export_animation": settings.usd_export_animation,
         })
         bpy.ops.wm.usd_export(**options)
         return full_path
@@ -775,8 +770,58 @@ class BATCH_EXPORT_OT_list_remove(Operator):
         return {'FINISHED'}
 
 
+class BATCH_EXPORT_OT_list_remove_invalid(Operator):
+    """Remove deleted or invalid objects from the export list"""
+    bl_idname = "batch_export.list_remove_invalid"
+    bl_label = "Remove Invalid Entries"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return len(context.scene.batch_export.export_list) > 0
+
+    def execute(self, context):
+        settings = context.scene.batch_export
+        removed = 0
+        for i in range(len(settings.export_list) - 1, -1, -1):
+            if settings.export_list[i].object is None:
+                settings.export_list.remove(i)
+                removed += 1
+        if removed:
+            last = max(0, len(settings.export_list) - 1)
+            settings.export_list_index = min(settings.export_list_index, last)
+            self.report({'INFO'}, f"Removed {removed} invalid entry(ies).")
+        else:
+            self.report({'INFO'}, "No invalid entries found.")
+        return {'FINISHED'}
+
+
+class BATCH_EXPORT_OT_open_directory(Operator):
+    """Open the export directory in the system file browser"""
+    bl_idname = "batch_export.open_directory"
+    bl_label = "Open Export Folder"
+
+    def execute(self, context):
+        settings = context.scene.batch_export
+        prefs = context.preferences.addons[__package__].preferences
+        try:
+            base_dir = utils.resolve_base_dir(settings, prefs)
+        except ValueError as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+
+        if not base_dir.is_dir():
+            self.report({'ERROR'}, f"Export directory does not exist:\n{base_dir}")
+            return {'CANCELLED'}
+
+        bpy.ops.wm.path_open(filepath=str(base_dir))
+        return {'FINISHED'}
+
+
 registry = [
     EXPORT_MESH_OT_batch,
     BATCH_EXPORT_OT_list_add,
     BATCH_EXPORT_OT_list_remove,
+    BATCH_EXPORT_OT_list_remove_invalid,
+    BATCH_EXPORT_OT_open_directory,
 ]

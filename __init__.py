@@ -5,6 +5,7 @@
 bl_info = {
     "name": "Super Duper Batch Exporter",
     "author": "Bastian L Strube, forked from Mrtripie",
+    "version": (2, 8, 2),
     "blender": (4, 2, 0),
     "category": "Import-Export",
     "location": "Set in preferences below. Default: Top Bar (After File, Edit, ...Help)",
@@ -92,7 +93,6 @@ def unregister():
     for pcoll in preview_collections.values():
         previews.remove(pcoll)
     preview_collections.clear()
-    custom_icons = None # Good practice to clear the global reference
 
     register_unregister_modules(reversed(module_names), False)
 

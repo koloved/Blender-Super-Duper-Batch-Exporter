@@ -18,10 +18,10 @@ Use existing export presets, set options like **Output Directory**, **Prefix**, 
 **Limit to** specifies which objects to export:
 - **Selected**
 - **Visible**
-- **Render Enabled and Visible**  (NEW)
+- **Render Enabled**  (NEW)
 
 ### Other Features
-- Supports: **DAE, ABC, USD, SVG, PDF, OBJ, PLY, STL, FBX, glTF**.
+- Supports: **ABC, USD, SVG, PDF, OBJ, PLY, STL, FBX, glTF**.
 - **FBX only feature**: Automatic LOD creation on export using decimate modifier. Game engines like Unreal and Unity will automatically setup LOD on import.
 - Choose between these UI Locations: **Top Bar**, **N-panel**, **3D Viewport Header**
 

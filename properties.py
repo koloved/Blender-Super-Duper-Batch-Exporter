@@ -152,6 +152,22 @@ class BatchExportSettings(PropertyGroup):
         ],
         default=".usdc",
     )
+    usd_export_animation: BoolProperty(
+        name="Export Animation",
+        description="Export the scene's frame range as USD animation",
+        default=False,
+    )
+    gltf_format: EnumProperty(
+        name="Format",
+        description="Which glTF file variant to export",
+        items=[
+            ('GLB', "Binary (.glb)",
+             "Single, self-contained binary file", 1),
+            ('GLTF_SEPARATE', "Separate (.gltf + .bin + textures)",
+             "Exports the scene, geometry and textures as separate files", 2),
+        ],
+        default='GLB',
+    )
     ply_ascii: BoolProperty(name="ASCII Format", default=False)
     stl_ascii: BoolProperty(name="ASCII Format", default=False)
 
@@ -165,16 +181,6 @@ class BatchExportSettings(PropertyGroup):
             'wm.alembic_export', self.abc_preset),
         set=lambda self, value: setattr(
             self, 'abc_preset', preset_enum_items_refs['wm.alembic_export'][value][0]),
-    )
-    dae_preset: StringProperty(default='NO_PRESET')
-    dae_preset_enum: EnumProperty(
-        name="Preset", options={'SKIP_SAVE'},
-        description="Use export settings from a preset.\n(Create in the export settings from the File > Export > Collada (.dae))",
-        items=lambda self, context: get_operator_presets('wm.collada_export'),
-        get=lambda self: get_preset_index(
-            'wm.collada_export', self.dae_preset),
-        set=lambda self, value: setattr(
-            self, 'dae_preset', preset_enum_items_refs['wm.collada_export'][value][0]),
     )
     usd_preset: StringProperty(default='NO_PRESET')
     usd_preset_enum: EnumProperty(
