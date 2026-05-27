@@ -20,7 +20,7 @@ class BatchExportPreferences(AddonPreferences):
     )
     project_dir: StringProperty(
         name="Project Directory",
-        description="Path that will be the base path of Directory, Leave empty to disable",
+        description="Base path of Directory setting, Leave empty to disable. Unique to this user prefs",
         subtype='DIR_PATH',
     )
     copy_on_export: BoolProperty(
